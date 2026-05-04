@@ -4,6 +4,7 @@
     generated_at: null,
     samples: [],
   };
+  const MANIFEST_PATH = "assets/token-demo/manifest.json";
 
   const state = {
     manifest: FALLBACK_MANIFEST,
@@ -55,7 +56,7 @@
     }
 
     try {
-      const response = await fetch("assets/token-demo/manifest.json", { cache: "no-store" });
+      const response = await fetch(cacheBustedPath(MANIFEST_PATH, Date.now()), { cache: "no-store" });
       if (!response.ok) {
         throw new Error(`Manifest request failed: ${response.status}`);
       }
@@ -93,6 +94,17 @@
 
   function setHidden(node, hidden) {
     node.classList.toggle("hidden", Boolean(hidden));
+  }
+
+  function cacheBustedPath(path, version) {
+    if (!path || !version) {
+      return path || "";
+    }
+    return `${path}${path.includes("?") ? "&" : "?"}v=${encodeURIComponent(version)}`;
+  }
+
+  function manifestAssetVersion() {
+    return state.manifest.generated_at || state.manifest.version || "";
   }
 
   function renderSampleTabs() {
@@ -252,9 +264,10 @@
     const title = hasToken
       ? `${sample.label || sample.id} - token ${state.tokenIndex}: ${label}`
       : "No graph selected";
-    const graphImage = hasToken ? token.graph_image || "" : "";
-    const scoreImage = hasToken ? token.score_image || "" : "";
-    const scoreAudio = sample ? sample.score_audio || "" : "";
+    const assetVersion = manifestAssetVersion();
+    const graphImage = hasToken ? cacheBustedPath(token.graph_image || "", assetVersion) : "";
+    const scoreImage = hasToken ? cacheBustedPath(token.score_image || "", assetVersion) : "";
+    const scoreAudio = sample ? cacheBustedPath(sample.score_audio || "", assetVersion) : "";
 
     els.viewerTitle.textContent = title;
 
