@@ -1,6 +1,6 @@
 window.TOKEN_DEMO_MANIFEST = {
-  "version": 3,
-  "generated_at": "2026-05-04T13:48:08.003148+00:00",
+  "version": 4,
+  "generated_at": "2026-05-04T17:25:00.000000+00:00",
   "export": {
     "status": "full",
     "viewport": {

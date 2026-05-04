@@ -12,10 +12,12 @@ import sys
 import tempfile
 import time
 import wave
+import zlib
+from binascii import crc32
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -500,6 +502,122 @@ def abc_score_frame_and_locator(page: Any) -> Optional[tuple[Any, Any]]:
     return None
 
 
+def png_chunks(data: bytes) -> Iterable[tuple[bytes, bytes]]:
+    if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise ValueError("Not a PNG file")
+    offset = 8
+    while offset < len(data):
+        length = int.from_bytes(data[offset : offset + 4], "big")
+        kind = data[offset + 4 : offset + 8]
+        payload = data[offset + 8 : offset + 8 + length]
+        yield kind, payload
+        offset += length + 12
+
+
+def read_png_rgb(path: Path) -> tuple[int, int, List[bytearray]]:
+    data = path.read_bytes()
+    width = height = bit_depth = color_type = None
+    idat_parts: List[bytes] = []
+    for kind, payload in png_chunks(data):
+        if kind == b"IHDR":
+            width = int.from_bytes(payload[0:4], "big")
+            height = int.from_bytes(payload[4:8], "big")
+            bit_depth = payload[8]
+            color_type = payload[9]
+            if payload[12] != 0:
+                raise ValueError("Interlaced PNG files are not supported")
+        elif kind == b"IDAT":
+            idat_parts.append(payload)
+        elif kind == b"IEND":
+            break
+    if width is None or height is None or bit_depth != 8 or color_type not in (2, 6):
+        raise ValueError("Only 8-bit RGB/RGBA PNG files are supported")
+
+    channels = 4 if color_type == 6 else 3
+    stride = width * channels
+    raw = zlib.decompress(b"".join(idat_parts))
+    rows: List[bytearray] = []
+    offset = 0
+    prev = bytearray(stride)
+    for _ in range(height):
+        filter_type = raw[offset]
+        offset += 1
+        row = bytearray(raw[offset : offset + stride])
+        offset += stride
+        for i, value in enumerate(row):
+            left = row[i - channels] if i >= channels else 0
+            up = prev[i]
+            up_left = prev[i - channels] if i >= channels else 0
+            if filter_type == 1:
+                row[i] = (value + left) & 0xFF
+            elif filter_type == 2:
+                row[i] = (value + up) & 0xFF
+            elif filter_type == 3:
+                row[i] = (value + ((left + up) // 2)) & 0xFF
+            elif filter_type == 4:
+                predictor = left + up - up_left
+                pa = abs(predictor - left)
+                pb = abs(predictor - up)
+                pc = abs(predictor - up_left)
+                row[i] = (value + (left if pa <= pb and pa <= pc else up if pb <= pc else up_left)) & 0xFF
+            elif filter_type != 0:
+                raise ValueError(f"Unsupported PNG filter type {filter_type}")
+        prev = row
+        if channels == 4:
+            rows.append(bytearray(channel for x in range(width) for channel in row[x * 4 : x * 4 + 3]))
+        else:
+            rows.append(row)
+    return width, height, rows
+
+
+def write_png_rgb(path: Path, width: int, height: int, rows: Sequence[bytes]) -> None:
+    def chunk(kind: bytes, payload: bytes) -> bytes:
+        checksum = crc32(kind)
+        checksum = crc32(payload, checksum) & 0xFFFFFFFF
+        return len(payload).to_bytes(4, "big") + kind + payload + checksum.to_bytes(4, "big")
+
+    ihdr = width.to_bytes(4, "big") + height.to_bytes(4, "big") + bytes([8, 2, 0, 0, 0])
+    raw = b"".join(b"\x00" + bytes(row) for row in rows)
+    path.write_bytes(
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", ihdr)
+        + chunk(b"IDAT", zlib.compress(raw, level=9))
+        + chunk(b"IEND", b"")
+    )
+
+
+def crop_score_png(path: Path, padding: int = 10, threshold: int = 245) -> None:
+    width, height, rows = read_png_rgb(path)
+
+    def is_foreground(x: int, y: int) -> bool:
+        offset = x * 3
+        return any(channel < threshold for channel in rows[y][offset : offset + 3])
+
+    score_rows = range(max(0, int(height * 0.22)), height)
+    score_xs = [x for y in score_rows for x in range(width) if is_foreground(x, y)]
+    if not score_xs:
+        return
+    content_right = min(width - 1, max(score_xs) + padding)
+    points = [
+        (x, y)
+        for y in range(height)
+        for x in range(content_right + 1)
+        if is_foreground(x, y)
+    ]
+    if not points:
+        return
+
+    left = max(0, min(x for x, _ in points) - padding)
+    right = content_right
+    top = max(0, min(y for _, y in points) - padding)
+    bottom = min(height - 1, max(y for _, y in points) + padding)
+    if left == 0 and right == width - 1 and top == 0 and bottom == height - 1:
+        return
+
+    cropped_rows = [row[left * 3 : (right + 1) * 3] for row in rows[top : bottom + 1]]
+    write_png_rgb(path, right - left + 1, bottom - top + 1, cropped_rows)
+
+
 def graph_svg_box(frame: Any) -> Optional[Dict[str, float]]:
     for selector in ("svg",):
         with contextlib.suppress(Exception):
@@ -632,6 +750,7 @@ def screenshot_token_assets(page: Any, frame: Any, graph_path: Path, score_path:
     score_path.parent.mkdir(parents=True, exist_ok=True)
     score_locator.scroll_into_view_if_needed()
     score_locator.screenshot(path=str(score_path), omit_background=False)
+    crop_score_png(score_path)
 
 
 def prepare_page(page: Any, args: argparse.Namespace, url: str, sample_id: str) -> Any:
