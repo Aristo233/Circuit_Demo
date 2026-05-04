@@ -236,6 +236,7 @@
       }
     };
     image.alt = alt;
+    image.loading = "eager";
     image.src = path;
   }
 
