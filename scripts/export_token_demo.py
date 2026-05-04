@@ -3,14 +3,15 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import io
 import json
+import math
 import os
 import socket
 import subprocess
 import sys
 import tempfile
 import time
+import wave
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,7 +21,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from llm_transparency_tool.server.dataset_utils import load_dataset_file
+from llm_transparency_tool.server.dataset_utils import extract_abc_segment, load_dataset_file
 
 
 DEFAULT_PYTHON = Path(sys.executable)
@@ -67,14 +68,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--python", type=Path, default=DEFAULT_PYTHON)
     parser.add_argument("--browser-executable", type=Path, default=DEFAULT_BROWSER)
+    parser.add_argument(
+        "--device",
+        choices=["gpu", "cpu", "auto"],
+        default="gpu",
+        help="Preferred Streamlit device. The default forces the app device selector to gpu when CUDA is visible.",
+    )
     parser.add_argument("--cuda-visible-devices", default=os.environ.get("CUDA_VISIBLE_DEVICES", "1"))
     parser.add_argument("--ld-preload-stub", default="/tmp/libittnotify_stub.so")
     parser.add_argument("--startup-timeout", type=float, default=420.0)
     parser.add_argument("--after-click-ms", type=int, default=1800)
     parser.add_argument("--viewport-width", type=int, default=2200)
     parser.add_argument("--viewport-height", type=int, default=2200)
-    parser.add_argument("--capture-width", type=int, default=0)
-    parser.add_argument("--capture-height", type=int, default=0)
     parser.add_argument(
         "--sample",
         dest="sample_ids",
@@ -129,6 +134,195 @@ def read_sample_sentence(sample: DemoSample) -> str:
     return sentence
 
 
+KEY_SIGNATURES: Dict[str, set[str]] = {
+    "C": set(),
+    "G": {"F"},
+    "D": {"F", "C"},
+    "A": {"F", "C", "G"},
+    "E": {"F", "C", "G", "D"},
+    "B": {"F", "C", "G", "D", "A"},
+    "F#": {"F", "C", "G", "D", "A", "E"},
+    "C#": {"F", "C", "G", "D", "A", "E", "B"},
+    "F": {"B"},
+    "Bb": {"B", "E"},
+    "Eb": {"B", "E", "A"},
+    "Ab": {"B", "E", "A", "D"},
+    "Db": {"B", "E", "A", "D", "G"},
+    "Gb": {"B", "E", "A", "D", "G", "C"},
+    "Cb": {"B", "E", "A", "D", "G", "C", "F"},
+}
+
+NOTE_OFFSETS = {
+    "C": 0,
+    "D": 2,
+    "E": 4,
+    "F": 5,
+    "G": 7,
+    "A": 9,
+    "B": 11,
+}
+
+
+def abc_header_value(abc_text: str, prefix: str) -> Optional[str]:
+    for line in abc_text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(prefix):
+            return stripped[len(prefix):].strip()
+    return None
+
+
+def parse_default_note_seconds(abc_text: str) -> float:
+    # Keep the static demo short and predictable. L: still controls relative note
+    # lengths, but Q: can override the base duration when present.
+    q_value = abc_header_value(abc_text, "Q:")
+    if q_value:
+        with contextlib.suppress(ValueError):
+            return 60.0 / float(q_value.split("=")[-1].strip())
+    return 0.24
+
+
+def parse_key_signature(abc_text: str) -> set[str]:
+    key_value = abc_header_value(abc_text, "K:") or "C"
+    key = key_value.split()[0].strip()
+    key = key.replace("maj", "").replace("major", "")
+    key = key[:1].upper() + key[1:]
+    return KEY_SIGNATURES.get(key, set())
+
+
+def parse_abc_duration(body: str, start: int) -> tuple[float, int]:
+    i = start
+    numerator = ""
+    while i < len(body) and body[i].isdigit():
+        numerator += body[i]
+        i += 1
+
+    duration = float(numerator) if numerator else 1.0
+    if i < len(body) and body[i] == "/":
+        slash_count = 0
+        while i < len(body) and body[i] == "/":
+            slash_count += 1
+            i += 1
+        denominator = ""
+        while i < len(body) and body[i].isdigit():
+            denominator += body[i]
+            i += 1
+        if denominator:
+            duration /= float(denominator)
+        else:
+            duration /= 2.0 ** slash_count
+
+    return duration, i
+
+
+def abc_note_to_midi(note: str, accidental: int, key_sharps: set[str], octave_marks: str) -> int:
+    name = note.upper()
+    octave = 5 if note.islower() else 4
+    midi = 12 * (octave + 1) + NOTE_OFFSETS[name]
+    if accidental == 0 and name in key_sharps:
+        midi += 1
+    else:
+        midi += accidental
+    midi += 12 * octave_marks.count("'")
+    midi -= 12 * octave_marks.count(",")
+    return midi
+
+
+def abc_to_note_events(abc_text: str) -> List[tuple[Optional[float], float]]:
+    body_span = abc_text.split("K:", 1)
+    body = body_span[1].split("\n", 1)[1] if len(body_span) == 2 and "\n" in body_span[1] else abc_text
+    key_sharps = parse_key_signature(abc_text)
+    base_seconds = parse_default_note_seconds(abc_text)
+    events: List[tuple[Optional[float], float]] = []
+
+    i = 0
+    while i < len(body):
+        char = body[i]
+        if char == '"':
+            i += 1
+            while i < len(body) and body[i] != '"':
+                i += 1
+            i += 1
+            continue
+        if char in "^_=" or char.upper() in NOTE_OFFSETS or char in "zZ":
+            accidental = 0
+            explicit_accidental = False
+            while i < len(body) and body[i] in "^_=":
+                explicit_accidental = True
+                if body[i] == "^":
+                    accidental += 1
+                elif body[i] == "_":
+                    accidental -= 1
+                else:
+                    accidental = 0
+                i += 1
+            if i >= len(body):
+                break
+
+            note = body[i]
+            if note in "zZ":
+                i += 1
+                duration, i = parse_abc_duration(body, i)
+                events.append((None, max(0.06, duration * base_seconds)))
+                continue
+            if note.upper() not in NOTE_OFFSETS:
+                i += 1
+                continue
+
+            i += 1
+            octave_marks = ""
+            while i < len(body) and body[i] in "',":
+                octave_marks += body[i]
+                i += 1
+            duration, i = parse_abc_duration(body, i)
+            midi = abc_note_to_midi(note, accidental if explicit_accidental else 0, key_sharps, octave_marks)
+            frequency = 440.0 * (2.0 ** ((midi - 69) / 12.0))
+            events.append((frequency, max(0.06, duration * base_seconds)))
+            continue
+        i += 1
+
+    return events
+
+
+def write_score_audio(output_path: Path, sentence: str) -> None:
+    abc_text = extract_abc_segment(sentence)
+    if not abc_text:
+        raise RuntimeError("Cannot generate score audio: selected sentence has no ABC segment")
+
+    events = abc_to_note_events(abc_text)
+    if not events:
+        raise RuntimeError("Cannot generate score audio: ABC segment has no note events")
+
+    sample_rate = 22050
+    gap_seconds = 0.018
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with wave.open(str(output_path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(sample_rate)
+        for frequency, duration in events:
+            total_frames = max(1, int(duration * sample_rate))
+            gap_frames = int(gap_seconds * sample_rate)
+            note_frames = max(1, total_frames - gap_frames)
+            frames = bytearray()
+            for frame in range(note_frames):
+                t = frame / sample_rate
+                attack = min(1.0, frame / max(1, int(0.015 * sample_rate)))
+                release = min(1.0, (note_frames - frame) / max(1, int(0.045 * sample_rate)))
+                envelope = min(attack, release)
+                if frequency is None:
+                    value = 0
+                else:
+                    sample = (
+                        math.sin(2.0 * math.pi * frequency * t)
+                        + 0.32 * math.sin(2.0 * math.pi * frequency * 2.0 * t)
+                    )
+                    value = int(12000 * envelope * sample / 1.32)
+                frames.extend(value.to_bytes(2, byteorder="little", signed=True))
+            frames.extend((0).to_bytes(2, byteorder="little", signed=True) * gap_frames)
+            handle.writeframes(frames)
+
+
 def write_temp_streamlit_config(tmpdir: Path, sample: DemoSample, sentence: str) -> Path:
     dataset_path = tmpdir / f"{sample.id}.txt"
     dataset_path.write_text(sentence.replace("\n", "\\n") + "\n", encoding="utf-8")
@@ -152,6 +346,10 @@ def build_streamlit_env(args: argparse.Namespace) -> Dict[str, str]:
     env = os.environ.copy()
     if args.cuda_visible_devices:
         env["CUDA_VISIBLE_DEVICES"] = str(args.cuda_visible_devices)
+    if args.device != "auto":
+        env["LLMTT_DEFAULT_DEVICE"] = str(args.device)
+        env["LLMTT_FORCE_DEVICE"] = str(args.device)
+    env["LLMTT_HIDE_SCORE_AUDIO"] = "1"
     stub = Path(args.ld_preload_stub)
     if stub.exists():
         current = env.get("LD_PRELOAD")
@@ -174,6 +372,39 @@ def wait_for_port(host: str, port: int, timeout: float) -> None:
     raise TimeoutError(f"Timed out waiting for {host}:{port}") from last_error
 
 
+def verify_requested_device(args: argparse.Namespace) -> None:
+    if args.device != "gpu":
+        return
+    cmd = [
+        str(args.python),
+        "-c",
+        (
+            "import os, torch; "
+            "print('CUDA_VISIBLE_DEVICES=' + str(os.environ.get('CUDA_VISIBLE_DEVICES'))); "
+            "print('cuda_available=' + str(torch.cuda.is_available())); "
+            "print('cuda_device_count=' + str(torch.cuda.device_count())); "
+            "raise SystemExit(0 if torch.cuda.is_available() and torch.cuda.device_count() > 0 else 1)"
+        ),
+    ]
+    result = subprocess.run(
+        cmd,
+        cwd=PROJECT_ROOT,
+        env=build_streamlit_env(args),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    if result.returncode != 0:
+        raise SystemExit(
+            "GPU export was requested, but the llmtt subprocess cannot see CUDA.\n"
+            f"{result.stdout.strip()}\n"
+            "Try running with a different GPU, for example `--cuda-visible-devices 0`, "
+            "or use `--device cpu` if GPU is unavailable."
+        )
+    print("[export] GPU check passed", flush=True)
+    print(result.stdout.strip(), flush=True)
+
+
 @contextlib.contextmanager
 def streamlit_server(args: argparse.Namespace, config_path: Path) -> Iterable[subprocess.Popen[str]]:
     cmd = [
@@ -190,12 +421,20 @@ def streamlit_server(args: argparse.Namespace, config_path: Path) -> Iterable[su
         "--",
         str(config_path),
     ]
+    env = build_streamlit_env(args)
+    print(
+        "[export] starting Streamlit with "
+        f"CUDA_VISIBLE_DEVICES={env.get('CUDA_VISIBLE_DEVICES')!r} "
+        f"LLMTT_FORCE_DEVICE={env.get('LLMTT_FORCE_DEVICE')!r} "
+        f"LD_PRELOAD={env.get('LD_PRELOAD', '')!r}",
+        flush=True,
+    )
     proc = subprocess.Popen(
         cmd,
         cwd=PROJECT_ROOT,
-        env=build_streamlit_env(args),
+        env=env,
         text=True,
-        stdout=subprocess.PIPE,
+        stdout=None if args.keep_streamlit_logs else subprocess.PIPE,
         stderr=subprocess.STDOUT,
     )
     try:
@@ -238,6 +477,107 @@ def find_graph_frame(page: Any, timeout: float = 240.0) -> Any:
     raise TimeoutError("Could not find contribution graph iframe with token selectors")
 
 
+def find_abc_score_frame(page: Any) -> Optional[Any]:
+    for frame in page.frames:
+        try:
+            if frame.locator("#abc-score-shell, #abc-paper").count() > 0:
+                return frame
+        except Exception:
+            continue
+    return None
+
+
+def abc_score_frame_and_locator(page: Any) -> Optional[tuple[Any, Any]]:
+    abc_frame = find_abc_score_frame(page)
+    if abc_frame is None:
+        return None
+    for selector in ("#abc-paper svg", "#abc-score-shell"):
+        with contextlib.suppress(Exception):
+            locator = abc_frame.locator(selector).first
+            box = locator.bounding_box()
+            if box and box.get("width", 0) > 0 and box.get("height", 0) > 0:
+                return abc_frame, locator
+    return None
+
+
+def graph_svg_box(frame: Any) -> Optional[Dict[str, float]]:
+    for selector in ("svg",):
+        with contextlib.suppress(Exception):
+            box = frame.locator(selector).first.bounding_box()
+            if box and box.get("width", 0) > 0 and box.get("height", 0) > 0:
+                return box
+    with contextlib.suppress(Exception):
+        return frame.frame_element().bounding_box()
+    return None
+
+
+def style_score_for_export(page: Any, graph_width: float) -> None:
+    abc_frame = find_abc_score_frame(page)
+    if abc_frame is None:
+        return
+    width = max(320, int(round(graph_width)))
+    with contextlib.suppress(Exception):
+        abc_frame.evaluate(
+            """
+            (width) => {
+              if (typeof window.__LLMTT_TOKEN_DEMO_SET_SCORE_WIDTH__ === "function") {
+                window.__LLMTT_TOKEN_DEMO_SET_SCORE_WIDTH__(width);
+              }
+              const shell = document.getElementById("abc-score-shell");
+              const paper = document.getElementById("abc-paper");
+              const svg = document.querySelector("#abc-paper svg");
+              const toolbar = document.getElementById("abc-toolbar");
+              const audio = document.getElementById("abc-audio");
+
+              document.documentElement.style.width = `${width}px`;
+              document.body.style.width = `${width}px`;
+              if (shell) {
+                shell.style.width = `${width}px`;
+                shell.style.maxWidth = `${width}px`;
+                shell.style.overflow = "visible";
+              }
+              if (paper) {
+                paper.style.width = `${width}px`;
+                paper.style.maxWidth = `${width}px`;
+              }
+              if (svg) {
+                svg.setAttribute("width", String(width));
+                svg.style.width = `${width}px`;
+                svg.style.maxWidth = `${width}px`;
+                svg.style.height = "auto";
+                svg.style.overflow = "visible";
+              }
+              for (const node of [toolbar, audio, ...document.querySelectorAll(".abcjs-inline-audio")]) {
+                if (node) {
+                  node.style.display = "none";
+                  node.style.visibility = "hidden";
+                }
+              }
+            }
+            """,
+            width,
+        )
+
+
+def write_page_diagnostics(page: Any, output_root: Path, sample_id: str, reason: str) -> None:
+    debug_dir = output_root / "_debug" / sample_id
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    safe_reason = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in reason)[:80]
+    screenshot_path = debug_dir / f"{safe_reason}.png"
+    text_path = debug_dir / f"{safe_reason}.txt"
+    html_path = debug_dir / f"{safe_reason}.html"
+
+    with contextlib.suppress(Exception):
+        page.screenshot(path=str(screenshot_path), full_page=True)
+    with contextlib.suppress(Exception):
+        visible_text = page.locator("body").inner_text(timeout=2000)
+        text_path.write_text(visible_text, encoding="utf-8")
+    with contextlib.suppress(Exception):
+        html_path.write_text(page.content(), encoding="utf-8")
+
+    print(f"[export] wrote debug diagnostics to {debug_dir}", flush=True)
+
+
 def extract_token_labels(frame: Any) -> List[str]:
     return frame.evaluate(
         """
@@ -272,41 +612,29 @@ def click_token(frame: Any, index: int) -> None:
     )
 
 
-def screenshot_graph_region(page: Any, frame: Any, args: argparse.Namespace, output_path: Path) -> None:
-    from PIL import Image
+def screenshot_token_assets(page: Any, frame: Any, graph_path: Path, score_path: Path) -> None:
+    graph_box = graph_svg_box(frame)
+    if not graph_box:
+        raise RuntimeError("Contribution graph SVG has no visible bounding box")
 
-    frame_element = frame.frame_element()
-    frame_box = frame_element.bounding_box()
-    if not frame_box:
-        raise RuntimeError("Contribution graph iframe has no visible bounding box")
+    style_score_for_export(page, graph_box["width"])
+    page.wait_for_timeout(150)
 
-    main_box = None
-    for selector in ('section[data-testid="stMain"]', 'div[data-testid="stAppViewContainer"]', "main"):
-        locator = page.locator(selector).first
-        try:
-            box = locator.bounding_box()
-        except Exception:
-            box = None
-        if box:
-            main_box = box
-            break
+    graph_locator = frame.locator("svg").first
+    graph_path.parent.mkdir(parents=True, exist_ok=True)
+    graph_locator.scroll_into_view_if_needed()
+    graph_locator.screenshot(path=str(graph_path), omit_background=False)
 
-    viewport = page.viewport_size or {"width": args.viewport_width, "height": args.viewport_height}
-    left = int(max(0, (main_box or frame_box)["x"]))
-    top = int(max(0, frame_box["y"] - 8))
-    width = int(args.capture_width or min(viewport["width"] - left, (main_box or {"width": viewport["width"]})["width"]))
-    height = int(args.capture_height or (viewport["height"] - top))
-    width = max(320, min(width, viewport["width"] - left))
-    height = max(320, min(height, viewport["height"] - top))
-
-    raw = page.screenshot(full_page=False)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with Image.open(io.BytesIO(raw)) as image:
-        crop = image.crop((left, top, left + width, top + height))
-        crop.save(output_path)
+    score_result = abc_score_frame_and_locator(page)
+    if score_result is None:
+        raise RuntimeError("ABC score SVG has no visible bounding box")
+    _, score_locator = score_result
+    score_path.parent.mkdir(parents=True, exist_ok=True)
+    score_locator.scroll_into_view_if_needed()
+    score_locator.screenshot(path=str(score_path), omit_background=False)
 
 
-def prepare_page(page: Any, args: argparse.Namespace, url: str) -> Any:
+def prepare_page(page: Any, args: argparse.Namespace, url: str, sample_id: str) -> Any:
     page.set_viewport_size({"width": args.viewport_width, "height": args.viewport_height})
     page.goto(url, wait_until="domcontentloaded", timeout=int(args.startup_timeout * 1000))
     page.add_style_tag(
@@ -322,7 +650,11 @@ def prepare_page(page: Any, args: argparse.Namespace, url: str) -> Any:
           }
         """
     )
-    frame = find_graph_frame(page)
+    try:
+        frame = find_graph_frame(page)
+    except TimeoutError:
+        write_page_diagnostics(page, args.output_root, sample_id, "graph_frame_timeout")
+        raise
     frame.frame_element().scroll_into_view_if_needed()
     page.wait_for_timeout(args.after_click_ms)
     return frame
@@ -330,7 +662,14 @@ def prepare_page(page: Any, args: argparse.Namespace, url: str) -> Any:
 
 def export_sample(sync_playwright: Any, args: argparse.Namespace, sample: DemoSample, sentence: str, config_path: Path) -> Dict[str, Any]:
     sample_dir = args.output_root / sample.id
-    sample_dir.mkdir(parents=True, exist_ok=True)
+    graph_dir = sample_dir / "graph"
+    score_dir = sample_dir / "score"
+    audio_dir = sample_dir / "audio"
+    graph_dir.mkdir(parents=True, exist_ok=True)
+    score_dir.mkdir(parents=True, exist_ok=True)
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    score_audio_path = audio_dir / "score.wav"
+    write_score_audio(score_audio_path, sentence)
     url = f"http://{args.host}:{args.port}"
     token_limit = 2 if args.smoke else args.max_tokens_per_sample
     tokens: List[Dict[str, Any]] = []
@@ -344,26 +683,31 @@ def export_sample(sync_playwright: Any, args: argparse.Namespace, sample: DemoSa
             )
             try:
                 page = browser.new_page()
-                frame = prepare_page(page, args, url)
+                frame = prepare_page(page, args, url, sample.id)
                 token_labels = extract_token_labels(frame)
                 if token_limit and token_limit > 0:
                     token_labels = token_labels[:token_limit]
 
                 for token_index, label in enumerate(token_labels):
-                    print(f"[export] {sample.id}: token {token_index + 1}/{len(token_labels)} {label!r}")
+                    print(f"[export] {sample.id}: token {token_index + 1}/{len(token_labels)} {label!r}", flush=True)
                     frame = find_graph_frame(page)
                     click_token(frame, token_index)
                     page.wait_for_timeout(args.after_click_ms)
                     frame = find_graph_frame(page)
                     frame.frame_element().scroll_into_view_if_needed()
                     image_name = f"token_{token_index:03d}.png"
-                    image_path = sample_dir / image_name
-                    screenshot_graph_region(page, frame, args, image_path)
+                    graph_path = graph_dir / image_name
+                    score_path = score_dir / image_name
+                    screenshot_token_assets(page, frame, graph_path, score_path)
+                    graph_image = f"assets/token-demo/{sample.id}/graph/{image_name}"
+                    score_image = f"assets/token-demo/{sample.id}/score/{image_name}"
                     tokens.append(
                         {
                             "index": token_index,
                             "display": label,
-                            "image": f"assets/token-demo/{sample.id}/{image_name}",
+                            "graph_image": graph_image,
+                            "score_image": score_image,
+                            "image": graph_image,
                         }
                     )
             finally:
@@ -377,6 +721,7 @@ def export_sample(sync_playwright: Any, args: argparse.Namespace, sample: DemoSa
         "dataset_file": sample.dataset_file,
         "line_index": sample.line_index,
         "sentence": sentence,
+        "score_audio": f"assets/token-demo/{sample.id}/audio/score.wav",
         "tokens": tokens,
     }
 
@@ -396,6 +741,7 @@ def main() -> None:
     args = parse_args()
     args.output_root = args.output_root.resolve()
     samples = selected_samples(args.sample_ids)
+    verify_requested_device(args)
     sync_playwright = import_playwright()
     exported_samples: List[Dict[str, Any]] = []
 
@@ -407,7 +753,7 @@ def main() -> None:
             exported_samples.append(export_sample(sync_playwright, args, sample, sentence, config_path))
 
     manifest = {
-        "version": 1,
+        "version": 3,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "export": {
             "status": "smoke" if args.smoke else "full",
@@ -427,10 +773,20 @@ def main() -> None:
 
     for sample in exported_samples:
         expected = len(sample["tokens"])
-        image_count = len(list((args.output_root / sample["id"]).glob("token_*.png")))
-        if expected != image_count:
-            raise RuntimeError(f"{sample['id']}: manifest tokens={expected}, images={image_count}")
-        print(f"[export] verified {sample['id']}: {image_count} screenshots")
+        graph_count = len(list((args.output_root / sample["id"] / "graph").glob("token_*.png")))
+        score_count = len(list((args.output_root / sample["id"] / "score").glob("token_*.png")))
+        audio_exists = (args.output_root / sample["id"] / "audio" / "score.wav").is_file()
+        if expected != graph_count or expected != score_count:
+            raise RuntimeError(
+                f"{sample['id']}: manifest tokens={expected}, "
+                f"graph images={graph_count}, score images={score_count}"
+            )
+        if not audio_exists:
+            raise RuntimeError(f"{sample['id']}: missing score audio")
+        print(
+            f"[export] verified {sample['id']}: "
+            f"{graph_count} graph screenshots, {score_count} score screenshots, 1 score audio"
+        )
 
 
 if __name__ == "__main__":

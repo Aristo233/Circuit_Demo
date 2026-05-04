@@ -37,21 +37,38 @@
           </div>
 
           <div id="token-strip" class="token-strip" aria-label="Token buttons"></div>
+
+          <section class="score-preview" aria-label="Score screenshot">
+            <div class="score-preview-header">
+              <p class="eyebrow">Score</p>
+              <a id="open-score-image" class="small-link" href="#" target="_blank" rel="noreferrer">Open</a>
+            </div>
+            <div class="score-stage">
+              <img id="score-screenshot" alt="" loading="lazy">
+              <div id="score-empty" class="score-empty">Score screenshot not generated.</div>
+              <div id="score-missing" class="score-empty">Score image missing.</div>
+            </div>
+            <div class="score-audio-row">
+              <audio id="score-audio" controls preload="metadata"></audio>
+              <a id="open-score-audio" class="small-link" href="#" target="_blank" rel="noreferrer">WAV</a>
+              <div id="score-audio-empty" class="score-empty small">Score audio not generated.</div>
+            </div>
+          </section>
         </aside>
 
-        <section class="viewer" aria-label="Streamlit screenshot">
+        <section class="viewer" aria-label="Graph screenshot">
           <div class="viewer-toolbar">
             <div>
-              <p class="eyebrow">Selected view</p>
+              <p class="eyebrow">Selected graph</p>
               <h2 id="viewer-title">No screenshot selected</h2>
             </div>
-            <a id="open-image" class="image-link" href="#" target="_blank" rel="noreferrer">Open image</a>
+            <a id="open-image" class="image-link" href="#" target="_blank" rel="noreferrer">Open graph</a>
           </div>
 
           <div class="image-stage">
             <img id="screenshot" alt="" loading="lazy">
             <div id="empty-state" class="empty-state">
-              <h3>Token screenshots are not generated yet.</h3>
+              <h3>Token graph screenshots are not generated yet.</h3>
               <p>Run the exporter to populate <code>demo_page/assets/token-demo/</code>.</p>
             </div>
             <div id="image-missing" class="empty-state">

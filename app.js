@@ -24,6 +24,13 @@
     emptyState: document.getElementById("empty-state"),
     imageMissing: document.getElementById("image-missing"),
     openImage: document.getElementById("open-image"),
+    scoreScreenshot: document.getElementById("score-screenshot"),
+    scoreEmpty: document.getElementById("score-empty"),
+    scoreMissing: document.getElementById("score-missing"),
+    openScoreImage: document.getElementById("open-score-image"),
+    scoreAudio: document.getElementById("score-audio"),
+    scoreAudioEmpty: document.getElementById("score-audio-empty"),
+    openScoreAudio: document.getElementById("open-score-audio"),
   };
 
   function normalizeManifest(raw) {
@@ -34,7 +41,9 @@
       ...raw,
       samples: raw.samples.map((sample) => ({
         ...sample,
-        tokens: Array.isArray(sample.tokens) ? sample.tokens : [],
+        tokens: Array.isArray(sample.tokens)
+          ? sample.tokens.filter((token) => token && (token.graph_image || token.score_image))
+          : [],
       })),
     };
   }
@@ -174,40 +183,99 @@
     });
   }
 
-  function renderViewer(sample, token) {
-    const hasToken = Boolean(sample && token);
-    const label = hasToken ? tokenLabel(token) : "";
-    els.viewerTitle.textContent = hasToken
-      ? `${sample.label || sample.id} - token ${state.tokenIndex}: ${label}`
-      : "No screenshot selected";
+  function renderImageAsset({ image, empty, missing, open, path, alt }) {
+    setHidden(image, true);
+    setHidden(empty, Boolean(path));
+    setHidden(missing, true);
+    if (open) {
+      setHidden(open, true);
+      open.removeAttribute("href");
+    }
+    image.removeAttribute("src");
+    image.alt = "";
+    image.dataset.path = path || "";
 
-    setHidden(els.emptyState, hasToken);
-    setHidden(els.imageMissing, true);
-    setHidden(els.screenshot, true);
-    setHidden(els.openImage, true);
-    els.screenshot.removeAttribute("src");
-    els.screenshot.alt = "";
-
-    if (!hasToken || !token.image) {
-      setHidden(els.emptyState, false);
+    if (!path) {
+      setHidden(empty, false);
       return;
     }
 
-    els.screenshot.onload = () => {
-      setHidden(els.screenshot, false);
-      setHidden(els.emptyState, true);
-      setHidden(els.imageMissing, true);
-      setHidden(els.openImage, false);
+    image.onload = () => {
+      if (image.dataset.path !== path) {
+        return;
+      }
+      setHidden(image, false);
+      setHidden(empty, true);
+      setHidden(missing, true);
+      if (open) {
+        open.href = path;
+        setHidden(open, false);
+      }
     };
-    els.screenshot.onerror = () => {
-      setHidden(els.screenshot, true);
-      setHidden(els.emptyState, true);
-      setHidden(els.imageMissing, false);
-      setHidden(els.openImage, true);
+    image.onerror = () => {
+      if (image.dataset.path !== path) {
+        return;
+      }
+      setHidden(image, true);
+      setHidden(empty, true);
+      setHidden(missing, false);
+      if (open) {
+        setHidden(open, true);
+      }
     };
-    els.screenshot.alt = `${sample.label || sample.id}, token ${state.tokenIndex}: ${label}`;
-    els.screenshot.src = token.image;
-    els.openImage.href = token.image;
+    image.alt = alt;
+    image.src = path;
+  }
+
+  function renderAudioAsset(path) {
+    setHidden(els.scoreAudio, true);
+    setHidden(els.openScoreAudio, true);
+    setHidden(els.scoreAudioEmpty, Boolean(path));
+    els.scoreAudio.removeAttribute("src");
+    els.openScoreAudio.removeAttribute("href");
+
+    if (!path) {
+      setHidden(els.scoreAudioEmpty, false);
+      return;
+    }
+
+    els.scoreAudio.src = path;
+    els.openScoreAudio.href = path;
+    setHidden(els.scoreAudio, false);
+    setHidden(els.openScoreAudio, false);
+    setHidden(els.scoreAudioEmpty, true);
+  }
+
+  function renderViewer(sample, token) {
+    const hasToken = Boolean(sample && token);
+    const label = hasToken ? tokenLabel(token) : "";
+    const title = hasToken
+      ? `${sample.label || sample.id} - token ${state.tokenIndex}: ${label}`
+      : "No graph selected";
+    const graphImage = hasToken ? token.graph_image || "" : "";
+    const scoreImage = hasToken ? token.score_image || "" : "";
+    const scoreAudio = sample ? sample.score_audio || "" : "";
+
+    els.viewerTitle.textContent = title;
+
+    renderImageAsset({
+      image: els.screenshot,
+      empty: els.emptyState,
+      missing: els.imageMissing,
+      open: els.openImage,
+      path: graphImage,
+      alt: hasToken ? `${sample.label || sample.id}, graph for token ${state.tokenIndex}: ${label}` : "",
+    });
+
+    renderImageAsset({
+      image: els.scoreScreenshot,
+      empty: els.scoreEmpty,
+      missing: els.scoreMissing,
+      open: els.openScoreImage,
+      path: scoreImage,
+      alt: hasToken ? `${sample.label || sample.id}, score for token ${state.tokenIndex}: ${label}` : "",
+    });
+    renderAudioAsset(scoreAudio);
   }
 
   function renderStepper(sample) {

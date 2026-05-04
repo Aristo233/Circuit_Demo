@@ -77,7 +77,8 @@ h3 {
 }
 
 .repo-link,
-.image-link {
+.image-link,
+.small-link {
   display: inline-flex;
   align-items: center;
   min-height: 38px;
@@ -90,9 +91,15 @@ h3 {
   white-space: nowrap;
 }
 
+.small-link {
+  min-height: 28px;
+  padding: 0 10px;
+  font-size: 0.78rem;
+}
+
 .workspace {
   display: grid;
-  grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+  grid-template-columns: minmax(320px, 420px) minmax(0, 1fr);
   gap: 16px;
   align-items: start;
 }
@@ -111,6 +118,7 @@ h3 {
   top: 16px;
   display: grid;
   gap: 18px;
+  min-height: calc(100vh - 132px);
   padding: 16px;
 }
 
@@ -198,7 +206,7 @@ select {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(64px, 1fr));
   gap: 6px;
-  max-height: 46vh;
+  max-height: 28vh;
   overflow: auto;
   padding-right: 2px;
 }
@@ -209,6 +217,72 @@ select {
   padding: 0 8px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.score-preview {
+  align-self: end;
+  display: grid;
+  gap: 8px;
+  margin-top: auto;
+}
+
+.score-preview-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.score-stage {
+  display: grid;
+  align-items: end;
+  min-height: 150px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fff;
+}
+
+#score-screenshot {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 220px;
+  object-fit: contain;
+  object-position: left bottom;
+}
+
+.score-empty {
+  display: grid;
+  min-height: 150px;
+  place-items: center;
+  padding: 16px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  text-align: center;
+}
+
+.score-empty.small {
+  min-height: 36px;
+  padding: 8px;
+}
+
+.score-audio-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.score-audio-row .score-empty {
+  grid-column: 1 / -1;
+}
+
+#score-audio {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  height: 34px;
 }
 
 .viewer {
@@ -242,8 +316,12 @@ select {
 }
 
 #screenshot.hidden,
+#score-screenshot.hidden,
+#score-audio.hidden,
 .empty-state.hidden,
-.image-link.hidden {
+.score-empty.hidden,
+.image-link.hidden,
+.small-link.hidden {
   display: none;
 }
 
@@ -296,6 +374,7 @@ select {
 
   .control-panel {
     position: static;
+    min-height: 0;
   }
 
   .token-strip {
