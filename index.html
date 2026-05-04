@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>LLM Transparency Tool Token Demo</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <main class="page-shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Static token-click demo</p>
+          <h1>LLM Transparency Tool</h1>
+        </div>
+        <span class="repo-link">GitHub Pages</span>
+      </header>
+
+      <section class="workspace" aria-label="Token screenshot viewer">
+        <aside class="control-panel" aria-label="Demo controls">
+          <div class="field">
+            <label for="sample-tabs">Sample</label>
+            <div id="sample-tabs" class="sample-tabs" role="tablist"></div>
+          </div>
+
+          <div class="sample-meta" id="sample-meta"></div>
+
+          <div class="field">
+            <label for="token-select">Token</label>
+            <select id="token-select"></select>
+          </div>
+
+          <div class="stepper" aria-label="Token navigation">
+            <button id="prev-token" type="button">Previous</button>
+            <output id="token-count" aria-live="polite"></output>
+            <button id="next-token" type="button">Next</button>
+          </div>
+
+          <div id="token-strip" class="token-strip" aria-label="Token buttons"></div>
+        </aside>
+
+        <section class="viewer" aria-label="Streamlit screenshot">
+          <div class="viewer-toolbar">
+            <div>
+              <p class="eyebrow">Selected view</p>
+              <h2 id="viewer-title">No screenshot selected</h2>
+            </div>
+            <a id="open-image" class="image-link" href="#" target="_blank" rel="noreferrer">Open image</a>
+          </div>
+
+          <div class="image-stage">
+            <img id="screenshot" alt="" loading="lazy">
+            <div id="empty-state" class="empty-state">
+              <h3>Token screenshots are not generated yet.</h3>
+              <p>Run the exporter to populate <code>demo_page/assets/token-demo/</code>.</p>
+            </div>
+            <div id="image-missing" class="empty-state">
+              <h3>Screenshot missing for this token.</h3>
+              <p>The manifest entry exists, but the image file could not be loaded.</p>
+            </div>
+          </div>
+        </section>
+      </section>
+
+      <details class="runbook">
+        <summary>Local Streamlit command used for export</summary>
+        <pre><code>export CUDA_VISIBLE_DEVICES=1
+export LD_PRELOAD=/tmp/libittnotify_stub.so${LD_PRELOAD:+:$LD_PRELOAD}
+streamlit run llm_transparency_tool/server/app.py -- config/local.json</code></pre>
+      </details>
+    </main>
+
+    <script src="assets/token-demo/manifest.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>

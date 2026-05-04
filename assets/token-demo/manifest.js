@@ -1,0 +1,30 @@
+window.TOKEN_DEMO_MANIFEST = {
+  "version": 1,
+  "generated_at": null,
+  "export": {
+    "status": "placeholder",
+    "note": "Run scripts/export_token_demo.py to populate token screenshots and rewrite this manifest."
+  },
+  "samples": [
+    {
+      "id": "i2-iteration-10025",
+      "label": "I-II-V-I / Iteration 10025",
+      "backbone": "I-II-V-I",
+      "iteration": 10025,
+      "dataset_file": "dataset/I-II-V-I/sample_input_nottingham.txt",
+      "line_index": 2,
+      "sentence": "### Key: A | Iteration 10025\nX:1\nL:1/8\nM:6/8\nK:A\n\"A\"eac \"Bm\"Bcd | \"E\"efg \"A\"a3 |",
+      "tokens": []
+    },
+    {
+      "id": "i4-iteration-30008",
+      "label": "I-IV-V-I / Iteration 30008",
+      "backbone": "I-IV-V-I",
+      "iteration": 30008,
+      "dataset_file": "dataset/I-IV-V-I/sample_input_nottingham.txt",
+      "line_index": 10,
+      "sentence": "### Key: A | Iteration 30008\nX:1\nL:1/8\nM:6/8\nK:A\n\"A\"e3 ecA | \"D\"Bcd \"E7\"cBA | \"A\"e3 ecA |",
+      "tokens": []
+    }
+  ]
+};
