@@ -29,6 +29,7 @@ from llm_transparency_tool.server.dataset_utils import extract_abc_segment, load
 DEFAULT_PYTHON = Path(sys.executable)
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "demo_page" / "assets" / "token-demo"
 DEFAULT_BROWSER = Path("/usr/bin/google-chrome")
+DEFAULT_CONTRIBUTION_THRESHOLD = 0.038
 
 
 @dataclass(frozen=True)
@@ -83,6 +84,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--viewport-width", type=int, default=2200)
     parser.add_argument("--viewport-height", type=int, default=2200)
     parser.add_argument(
+        "--contribution-threshold",
+        type=float,
+        default=DEFAULT_CONTRIBUTION_THRESHOLD,
+        help="Contribution graph threshold to force in Streamlit during export.",
+    )
+    parser.add_argument(
         "--sample",
         dest="sample_ids",
         action="append",
@@ -136,22 +143,22 @@ def read_sample_sentence(sample: DemoSample) -> str:
     return sentence
 
 
-KEY_SIGNATURES: Dict[str, set[str]] = {
-    "C": set(),
-    "G": {"F"},
-    "D": {"F", "C"},
-    "A": {"F", "C", "G"},
-    "E": {"F", "C", "G", "D"},
-    "B": {"F", "C", "G", "D", "A"},
-    "F#": {"F", "C", "G", "D", "A", "E"},
-    "C#": {"F", "C", "G", "D", "A", "E", "B"},
-    "F": {"B"},
-    "Bb": {"B", "E"},
-    "Eb": {"B", "E", "A"},
-    "Ab": {"B", "E", "A", "D"},
-    "Db": {"B", "E", "A", "D", "G"},
-    "Gb": {"B", "E", "A", "D", "G", "C"},
-    "Cb": {"B", "E", "A", "D", "G", "C", "F"},
+KEY_SIGNATURES: Dict[str, Dict[str, int]] = {
+    "C": {},
+    "G": {"F": 1},
+    "D": {"F": 1, "C": 1},
+    "A": {"F": 1, "C": 1, "G": 1},
+    "E": {"F": 1, "C": 1, "G": 1, "D": 1},
+    "B": {"F": 1, "C": 1, "G": 1, "D": 1, "A": 1},
+    "F#": {"F": 1, "C": 1, "G": 1, "D": 1, "A": 1, "E": 1},
+    "C#": {"F": 1, "C": 1, "G": 1, "D": 1, "A": 1, "E": 1, "B": 1},
+    "F": {"B": -1},
+    "Bb": {"B": -1, "E": -1},
+    "Eb": {"B": -1, "E": -1, "A": -1},
+    "Ab": {"B": -1, "E": -1, "A": -1, "D": -1},
+    "Db": {"B": -1, "E": -1, "A": -1, "D": -1, "G": -1},
+    "Gb": {"B": -1, "E": -1, "A": -1, "D": -1, "G": -1, "C": -1},
+    "Cb": {"B": -1, "E": -1, "A": -1, "D": -1, "G": -1, "C": -1, "F": -1},
 }
 
 NOTE_OFFSETS = {
@@ -173,17 +180,36 @@ def abc_header_value(abc_text: str, prefix: str) -> Optional[str]:
     return None
 
 
+def parse_fraction(value: Optional[str], fallback: float) -> float:
+    if not value:
+        return fallback
+    raw = value.strip().split()[0]
+    with contextlib.suppress(ValueError, ZeroDivisionError):
+        if "/" in raw:
+            numerator, denominator = raw.split("/", 1)
+            return float(numerator or "1") / float(denominator)
+        return float(raw)
+    return fallback
+
+
 def parse_default_note_seconds(abc_text: str) -> float:
-    # Keep the static demo short and predictable. L: still controls relative note
-    # lengths, but Q: can override the base duration when present.
+    default_note = parse_fraction(abc_header_value(abc_text, "L:"), 1.0 / 8.0)
+    beat_note = 1.0 / 4.0
+    bpm = 120.0
     q_value = abc_header_value(abc_text, "Q:")
     if q_value:
-        with contextlib.suppress(ValueError):
-            return 60.0 / float(q_value.split("=")[-1].strip())
-    return 0.24
+        if "=" in q_value:
+            left, right = q_value.split("=", 1)
+            beat_note = parse_fraction(left, beat_note)
+            with contextlib.suppress(ValueError):
+                bpm = float(right.strip())
+        else:
+            with contextlib.suppress(ValueError):
+                bpm = float(q_value.strip())
+    return (60.0 / bpm) * (default_note / beat_note)
 
 
-def parse_key_signature(abc_text: str) -> set[str]:
+def parse_key_signature(abc_text: str) -> Dict[str, int]:
     key_value = abc_header_value(abc_text, "K:") or "C"
     key = key_value.split()[0].strip()
     key = key.replace("maj", "").replace("major", "")
@@ -216,14 +242,14 @@ def parse_abc_duration(body: str, start: int) -> tuple[float, int]:
     return duration, i
 
 
-def abc_note_to_midi(note: str, accidental: int, key_sharps: set[str], octave_marks: str) -> int:
+def abc_note_to_midi(note: str, accidental: int, explicit_accidental: bool, key_signature: Dict[str, int], octave_marks: str) -> int:
     name = note.upper()
     octave = 5 if note.islower() else 4
     midi = 12 * (octave + 1) + NOTE_OFFSETS[name]
-    if accidental == 0 and name in key_sharps:
-        midi += 1
-    else:
+    if explicit_accidental:
         midi += accidental
+    else:
+        midi += key_signature.get(name, 0)
     midi += 12 * octave_marks.count("'")
     midi -= 12 * octave_marks.count(",")
     return midi
@@ -232,7 +258,7 @@ def abc_note_to_midi(note: str, accidental: int, key_sharps: set[str], octave_ma
 def abc_to_note_events(abc_text: str) -> List[tuple[Optional[float], float]]:
     body_span = abc_text.split("K:", 1)
     body = body_span[1].split("\n", 1)[1] if len(body_span) == 2 and "\n" in body_span[1] else abc_text
-    key_sharps = parse_key_signature(abc_text)
+    key_signature = parse_key_signature(abc_text)
     base_seconds = parse_default_note_seconds(abc_text)
     events: List[tuple[Optional[float], float]] = []
 
@@ -276,7 +302,7 @@ def abc_to_note_events(abc_text: str) -> List[tuple[Optional[float], float]]:
                 octave_marks += body[i]
                 i += 1
             duration, i = parse_abc_duration(body, i)
-            midi = abc_note_to_midi(note, accidental if explicit_accidental else 0, key_sharps, octave_marks)
+            midi = abc_note_to_midi(note, accidental, explicit_accidental, key_signature, octave_marks)
             frequency = 440.0 * (2.0 ** ((midi - 69) / 12.0))
             events.append((frequency, max(0.06, duration * base_seconds)))
             continue
@@ -352,6 +378,7 @@ def build_streamlit_env(args: argparse.Namespace) -> Dict[str, str]:
         env["LLMTT_DEFAULT_DEVICE"] = str(args.device)
         env["LLMTT_FORCE_DEVICE"] = str(args.device)
     env["LLMTT_HIDE_SCORE_AUDIO"] = "1"
+    env["LLMTT_CONTRIBUTION_THRESHOLD"] = f"{args.contribution_threshold:.3f}"
     stub = Path(args.ld_preload_stub)
     if stub.exists():
         current = env.get("LD_PRELOAD")
@@ -428,6 +455,7 @@ def streamlit_server(args: argparse.Namespace, config_path: Path) -> Iterable[su
         "[export] starting Streamlit with "
         f"CUDA_VISIBLE_DEVICES={env.get('CUDA_VISIBLE_DEVICES')!r} "
         f"LLMTT_FORCE_DEVICE={env.get('LLMTT_FORCE_DEVICE')!r} "
+        f"LLMTT_CONTRIBUTION_THRESHOLD={env.get('LLMTT_CONTRIBUTION_THRESHOLD')!r} "
         f"LD_PRELOAD={env.get('LD_PRELOAD', '')!r}",
         flush=True,
     )
@@ -710,6 +738,41 @@ def extract_token_labels(frame: Any) -> List[str]:
     )
 
 
+def chord_token_entries(token_labels: Sequence[str]) -> List[Dict[str, Any]]:
+    entries: List[Dict[str, Any]] = []
+    i = 0
+    chord_ordinal = 0
+    while i < len(token_labels):
+        if token_labels[i] != '"':
+            i += 1
+            continue
+
+        i += 1
+        part_indices: List[int] = []
+        parts: List[str] = []
+        while i < len(token_labels) and token_labels[i] != '"':
+            piece = token_labels[i]
+            if piece:
+                part_indices.append(i)
+                parts.append(piece)
+            i += 1
+
+        label = "".join(parts).strip()
+        if label and part_indices:
+            chord_ordinal += 1
+            entries.append(
+                {
+                    "index": part_indices[0],
+                    "display": label,
+                    "kind": "chord",
+                    "chord_ordinal": chord_ordinal,
+                    "token_span": [part_indices[0], part_indices[-1]],
+                }
+            )
+        i += 1
+    return entries
+
+
 def click_token(frame: Any, index: int) -> None:
     frame.evaluate(
         """
@@ -753,6 +816,14 @@ def screenshot_token_assets(page: Any, frame: Any, graph_path: Path, score_path:
     crop_score_png(score_path)
 
 
+def clear_existing_token_pngs(*directories: Path) -> None:
+    for directory in directories:
+        if not directory.is_dir():
+            continue
+        for path in directory.glob("token_*.png"):
+            path.unlink()
+
+
 def prepare_page(page: Any, args: argparse.Namespace, url: str, sample_id: str) -> Any:
     page.set_viewport_size({"width": args.viewport_width, "height": args.viewport_height})
     page.goto(url, wait_until="domcontentloaded", timeout=int(args.startup_timeout * 1000))
@@ -787,6 +858,7 @@ def export_sample(sync_playwright: Any, args: argparse.Namespace, sample: DemoSa
     graph_dir.mkdir(parents=True, exist_ok=True)
     score_dir.mkdir(parents=True, exist_ok=True)
     audio_dir.mkdir(parents=True, exist_ok=True)
+    clear_existing_token_pngs(sample_dir, graph_dir, score_dir)
     score_audio_path = audio_dir / "score.wav"
     write_score_audio(score_audio_path, sentence)
     url = f"http://{args.host}:{args.port}"
@@ -804,11 +876,20 @@ def export_sample(sync_playwright: Any, args: argparse.Namespace, sample: DemoSa
                 page = browser.new_page()
                 frame = prepare_page(page, args, url, sample.id)
                 token_labels = extract_token_labels(frame)
+                token_entries = chord_token_entries(token_labels)
+                if not token_entries:
+                    raise RuntimeError(f"{sample.id}: no chord token entries found")
                 if token_limit and token_limit > 0:
-                    token_labels = token_labels[:token_limit]
+                    token_entries = token_entries[:token_limit]
 
-                for token_index, label in enumerate(token_labels):
-                    print(f"[export] {sample.id}: token {token_index + 1}/{len(token_labels)} {label!r}", flush=True)
+                for export_index, token_entry in enumerate(token_entries):
+                    token_index = int(token_entry["index"])
+                    label = str(token_entry["display"])
+                    print(
+                        f"[export] {sample.id}: chord {export_index + 1}/{len(token_entries)} "
+                        f"token {token_index} {label!r}",
+                        flush=True,
+                    )
                     frame = find_graph_frame(page)
                     click_token(frame, token_index)
                     page.wait_for_timeout(args.after_click_ms)
@@ -822,8 +903,7 @@ def export_sample(sync_playwright: Any, args: argparse.Namespace, sample: DemoSa
                     score_image = f"assets/token-demo/{sample.id}/score/{image_name}"
                     tokens.append(
                         {
-                            "index": token_index,
-                            "display": label,
+                            **token_entry,
                             "graph_image": graph_image,
                             "score_image": score_image,
                             "image": graph_image,
@@ -872,7 +952,7 @@ def main() -> None:
             exported_samples.append(export_sample(sync_playwright, args, sample, sentence, config_path))
 
     manifest = {
-        "version": 3,
+        "version": 5,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "export": {
             "status": "smoke" if args.smoke else "full",
@@ -881,7 +961,7 @@ def main() -> None:
                 "height": args.viewport_height,
             },
             "graph_defaults": {
-                "contribution_threshold": 0.05,
+                "contribution_threshold": args.contribution_threshold,
                 "renormalize_after_threshold": True,
                 "normalize_before_unembedding": True,
             },

@@ -43,7 +43,7 @@
       samples: raw.samples.map((sample) => ({
         ...sample,
         tokens: Array.isArray(sample.tokens)
-          ? sample.tokens.filter((token) => token && (token.graph_image || token.score_image))
+          ? sample.tokens.filter((token) => token && token.kind === "chord" && (token.graph_image || token.score_image))
           : [],
       })),
     };
@@ -84,6 +84,10 @@
     }
     const text = token.display || token.text || "";
     return text === "" ? "(empty)" : text;
+  }
+
+  function tokenIndexLabel(token, fallback) {
+    return Number.isFinite(Number(token && token.index)) ? Number(token.index) : fallback;
   }
 
   function clearElement(node) {
@@ -169,7 +173,7 @@
     sample.tokens.forEach((token, index) => {
       const option = document.createElement("option");
       option.value = String(index);
-      option.textContent = `${index}: ${tokenLabel(token)}`;
+      option.textContent = `${tokenIndexLabel(token, index)}: ${tokenLabel(token)}`;
       option.selected = index === state.tokenIndex;
       els.tokenSelect.appendChild(option);
     });
@@ -185,7 +189,7 @@
       const button = document.createElement("button");
       button.type = "button";
       button.className = `token-chip${index === state.tokenIndex ? " active" : ""}`;
-      button.title = `${index}: ${tokenLabel(token)}`;
+      button.title = `${tokenIndexLabel(token, index)}: ${tokenLabel(token)}`;
       button.textContent = tokenLabel(token);
       button.addEventListener("click", () => {
         state.tokenIndex = index;
@@ -263,7 +267,7 @@
     const hasToken = Boolean(sample && token);
     const label = hasToken ? tokenLabel(token) : "";
     const title = hasToken
-      ? `${sample.label || sample.id} - token ${state.tokenIndex}: ${label}`
+      ? `${sample.label || sample.id} - token ${tokenIndexLabel(token, state.tokenIndex)}: ${label}`
       : "No graph selected";
     const assetVersion = manifestAssetVersion();
     const graphImage = hasToken ? cacheBustedPath(token.graph_image || "", assetVersion) : "";

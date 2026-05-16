@@ -49,9 +49,9 @@ The exporter writes manifests plus separate graph and score screenshots into:
 
 ```text
 demo_page/assets/token-demo/
-demo_page/assets/token-demo/<sample-id>/graph/token_000.png
-demo_page/assets/token-demo/<sample-id>/score/token_000.png
+demo_page/assets/token-demo/<sample-id>/graph/token_<original-index>.png
+demo_page/assets/token-demo/<sample-id>/score/token_<original-index>.png
 demo_page/assets/token-demo/<sample-id>/audio/score.wav
 ```
 
-It uses the current Streamlit defaults: contribution threshold `0.05`, renormalize enabled, normalize enabled, and the current graph scale.
+It exports only chord tokens. The default graph settings are contribution threshold `0.038`, renormalize enabled, normalize enabled, and the current graph scale.
