@@ -43,7 +43,7 @@
       samples: raw.samples.map((sample) => ({
         ...sample,
         tokens: Array.isArray(sample.tokens)
-          ? sample.tokens.filter((token) => token && token.kind === "chord" && (token.graph_image || token.score_image))
+          ? sample.tokens.filter((token) => token && (token.kind === "chord" || token.kind === "chord_element") && (token.graph_image || token.score_image))
           : [],
       })),
     };
@@ -88,6 +88,32 @@
 
   function tokenIndexLabel(token, fallback) {
     return Number.isFinite(Number(token && token.index)) ? Number(token.index) : fallback;
+  }
+
+  function chordRoleLabel(token) {
+    const role = token && token.chord_element;
+    if (role === "opening_quote") {
+      return "opening quote";
+    }
+    if (role === "closing_quote") {
+      return "closing quote";
+    }
+    if (role === "chord_number") {
+      return "number";
+    }
+    if (role === "chord_text") {
+      return "chord text";
+    }
+    return "";
+  }
+
+  function tokenOptionLabel(token, fallback) {
+    const index = tokenIndexLabel(token, fallback);
+    const label = tokenLabel(token);
+    const chord = token && token.chord_label ? String(token.chord_label) : "";
+    const role = chordRoleLabel(token);
+    const suffix = chord && role ? ` (${chord} ${role})` : chord ? ` (${chord})` : "";
+    return `${index}: ${label}${suffix}`;
   }
 
   function clearElement(node) {
@@ -173,7 +199,7 @@
     sample.tokens.forEach((token, index) => {
       const option = document.createElement("option");
       option.value = String(index);
-      option.textContent = `${tokenIndexLabel(token, index)}: ${tokenLabel(token)}`;
+      option.textContent = tokenOptionLabel(token, index);
       option.selected = index === state.tokenIndex;
       els.tokenSelect.appendChild(option);
     });
@@ -189,7 +215,7 @@
       const button = document.createElement("button");
       button.type = "button";
       button.className = `token-chip${index === state.tokenIndex ? " active" : ""}`;
-      button.title = `${tokenIndexLabel(token, index)}: ${tokenLabel(token)}`;
+      button.title = tokenOptionLabel(token, index);
       button.textContent = tokenLabel(token);
       button.addEventListener("click", () => {
         state.tokenIndex = index;
@@ -266,8 +292,11 @@
   function renderViewer(sample, token) {
     const hasToken = Boolean(sample && token);
     const label = hasToken ? tokenLabel(token) : "";
+    const tokenContext = hasToken && token.chord_label
+      ? ` (${token.chord_label}${chordRoleLabel(token) ? ` ${chordRoleLabel(token)}` : ""})`
+      : "";
     const title = hasToken
-      ? `${sample.label || sample.id} - token ${tokenIndexLabel(token, state.tokenIndex)}: ${label}`
+      ? `${sample.label || sample.id} - token ${tokenIndexLabel(token, state.tokenIndex)}: ${label}${tokenContext}`
       : "No graph selected";
     const assetVersion = manifestAssetVersion();
     const graphImage = hasToken ? cacheBustedPath(token.graph_image || "", assetVersion) : "";

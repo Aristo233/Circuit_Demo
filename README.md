@@ -26,7 +26,7 @@ Install the browser automation dependency in the `llmtt` environment:
 /home/zixiao.wang/.conda/envs/llmtt/bin/python -m pip install -r demo_page/scripts/requirements-token-demo-export.txt
 ```
 
-Smoke export, two tokens per sample:
+Smoke export, two chord elements per sample:
 
 ```bash
 /home/zixiao.wang/.conda/envs/llmtt/bin/python demo_page/scripts/export_token_demo.py --smoke
@@ -54,4 +54,4 @@ demo_page/assets/token-demo/<sample-id>/score/token_<original-index>.png
 demo_page/assets/token-demo/<sample-id>/audio/score.wav
 ```
 
-It exports only chord tokens. The default graph settings are contribution threshold `0.038`, renormalize enabled, normalize enabled, and the current graph scale.
+It exports only chord-literal elements: the opening quote, chord text, chord number tokens such as `7`, and the closing quote. The default graph settings are contribution threshold `0.038`, renormalize enabled, normalize enabled, and the current graph scale. The generated `score.wav` files use the export helper's piano-like offline synthesizer.

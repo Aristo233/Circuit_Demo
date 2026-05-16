@@ -214,7 +214,7 @@ def parse_key_signature(abc_text: str) -> Dict[str, int]:
     key = key_value.split()[0].strip()
     key = key.replace("maj", "").replace("major", "")
     key = key[:1].upper() + key[1:]
-    return KEY_SIGNATURES.get(key, set())
+    return KEY_SIGNATURES.get(key, {})
 
 
 def parse_abc_duration(body: str, start: int) -> tuple[float, int]:
@@ -311,6 +311,30 @@ def abc_to_note_events(abc_text: str) -> List[tuple[Optional[float], float]]:
     return events
 
 
+def piano_harmonic_sample(frequency: float, t: float, duration: float) -> float:
+    attack = min(1.0, t / 0.008)
+    release = 1.0 if t <= duration else math.exp(-(t - duration) / 0.18)
+    base_decay = max(0.32, min(1.15, 1.25 - (frequency - 220.0) / 1600.0))
+    partials = (
+        (1, 1.00),
+        (2, 0.50),
+        (3, 0.24),
+        (4, 0.12),
+        (5, 0.075),
+        (6, 0.045),
+        (8, 0.022),
+    )
+    sample = 0.0
+    for harmonic, weight in partials:
+        inharmonicity = 1.0 + 0.00045 * harmonic * harmonic
+        partial_frequency = frequency * harmonic * inharmonicity
+        partial_decay = math.exp(-t / max(0.06, base_decay / (harmonic ** 0.72)))
+        sample += weight * partial_decay * math.sin(2.0 * math.pi * partial_frequency * t)
+
+    hammer = math.exp(-t / 0.012) * math.sin(2.0 * math.pi * frequency * 12.0 * t)
+    return attack * release * (sample + 0.055 * hammer)
+
+
 def write_score_audio(output_path: Path, sentence: str) -> None:
     abc_text = extract_abc_segment(sentence)
     if not abc_text:
@@ -320,35 +344,45 @@ def write_score_audio(output_path: Path, sentence: str) -> None:
     if not events:
         raise RuntimeError("Cannot generate score audio: ABC segment has no note events")
 
-    sample_rate = 22050
-    gap_seconds = 0.018
+    sample_rate = 44100
+    release_tail_seconds = 0.42
+    master_gain = 0.34
     output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    starts: List[float] = []
+    cursor = 0.0
+    for _frequency, duration in events:
+        starts.append(cursor)
+        cursor += duration
+
+    total_seconds = cursor + release_tail_seconds
+    total_frames = max(1, int(math.ceil(total_seconds * sample_rate)))
+    mix = [0.0] * total_frames
+
+    for (frequency, duration), start_seconds in zip(events, starts):
+        if frequency is None:
+            continue
+        start_frame = int(start_seconds * sample_rate)
+        note_frames = max(1, int(math.ceil((duration + release_tail_seconds) * sample_rate)))
+        for frame in range(note_frames):
+            target = start_frame + frame
+            if target >= total_frames:
+                break
+            t = frame / sample_rate
+            mix[target] += piano_harmonic_sample(frequency, t, duration)
+
+    peak = max((abs(value) for value in mix), default=1.0)
+    scale = min(master_gain / peak, master_gain) if peak > 0 else master_gain
 
     with wave.open(str(output_path), "wb") as handle:
         handle.setnchannels(1)
         handle.setsampwidth(2)
         handle.setframerate(sample_rate)
-        for frequency, duration in events:
-            total_frames = max(1, int(duration * sample_rate))
-            gap_frames = int(gap_seconds * sample_rate)
-            note_frames = max(1, total_frames - gap_frames)
-            frames = bytearray()
-            for frame in range(note_frames):
-                t = frame / sample_rate
-                attack = min(1.0, frame / max(1, int(0.015 * sample_rate)))
-                release = min(1.0, (note_frames - frame) / max(1, int(0.045 * sample_rate)))
-                envelope = min(attack, release)
-                if frequency is None:
-                    value = 0
-                else:
-                    sample = (
-                        math.sin(2.0 * math.pi * frequency * t)
-                        + 0.32 * math.sin(2.0 * math.pi * frequency * 2.0 * t)
-                    )
-                    value = int(12000 * envelope * sample / 1.32)
-                frames.extend(value.to_bytes(2, byteorder="little", signed=True))
-            frames.extend((0).to_bytes(2, byteorder="little", signed=True) * gap_frames)
-            handle.writeframes(frames)
+        frames = bytearray()
+        for value in mix:
+            sample = max(-1.0, min(1.0, value * scale))
+            frames.extend(int(sample * 32767).to_bytes(2, byteorder="little", signed=True))
+        handle.writeframes(frames)
 
 
 def write_temp_streamlit_config(tmpdir: Path, sample: DemoSample, sentence: str) -> Path:
@@ -738,6 +772,39 @@ def extract_token_labels(frame: Any) -> List[str]:
     )
 
 
+def chord_element_role(token_text: str) -> str:
+    stripped = token_text.strip()
+    if stripped == '"':
+        return "quote"
+    if stripped and all(char.isdigit() for char in stripped):
+        return "chord_number"
+    return "chord_text"
+
+
+def append_chord_element_entry(
+    entries: List[Dict[str, Any]],
+    *,
+    index: int,
+    display: str,
+    chord_label: str,
+    chord_ordinal: int,
+    role: str,
+    chord_span: List[int],
+) -> None:
+    entries.append(
+        {
+            "index": index,
+            "display": display,
+            "kind": "chord_element",
+            "chord_ordinal": chord_ordinal,
+            "chord_label": chord_label,
+            "chord_element": role,
+            "token_span": [index, index],
+            "chord_span": chord_span,
+        }
+    )
+
+
 def chord_token_entries(token_labels: Sequence[str]) -> List[Dict[str, Any]]:
     entries: List[Dict[str, Any]] = []
     i = 0
@@ -747,6 +814,7 @@ def chord_token_entries(token_labels: Sequence[str]) -> List[Dict[str, Any]]:
             i += 1
             continue
 
+        opening_quote_index = i
         i += 1
         part_indices: List[int] = []
         parts: List[str] = []
@@ -757,17 +825,41 @@ def chord_token_entries(token_labels: Sequence[str]) -> List[Dict[str, Any]]:
                 parts.append(piece)
             i += 1
 
+        if i >= len(token_labels):
+            break
+
+        closing_quote_index = i
         label = "".join(parts).strip()
         if label and part_indices:
             chord_ordinal += 1
-            entries.append(
-                {
-                    "index": part_indices[0],
-                    "display": label,
-                    "kind": "chord",
-                    "chord_ordinal": chord_ordinal,
-                    "token_span": [part_indices[0], part_indices[-1]],
-                }
+            chord_span = [opening_quote_index, closing_quote_index]
+            append_chord_element_entry(
+                entries,
+                index=opening_quote_index,
+                display=token_labels[opening_quote_index],
+                chord_label=label,
+                chord_ordinal=chord_ordinal,
+                role="opening_quote",
+                chord_span=chord_span,
+            )
+            for part_index in part_indices:
+                append_chord_element_entry(
+                    entries,
+                    index=part_index,
+                    display=token_labels[part_index],
+                    chord_label=label,
+                    chord_ordinal=chord_ordinal,
+                    role=chord_element_role(token_labels[part_index]),
+                    chord_span=chord_span,
+                )
+            append_chord_element_entry(
+                entries,
+                index=closing_quote_index,
+                display=token_labels[closing_quote_index],
+                chord_label=label,
+                chord_ordinal=chord_ordinal,
+                role="closing_quote",
+                chord_span=chord_span,
             )
         i += 1
     return entries
@@ -841,7 +933,7 @@ def prepare_page(page: Any, args: argparse.Namespace, url: str, sample_id: str) 
         """
     )
     try:
-        frame = find_graph_frame(page)
+        frame = find_graph_frame(page, timeout=args.startup_timeout)
     except TimeoutError:
         write_page_diagnostics(page, args.output_root, sample_id, "graph_frame_timeout")
         raise
@@ -878,16 +970,18 @@ def export_sample(sync_playwright: Any, args: argparse.Namespace, sample: DemoSa
                 token_labels = extract_token_labels(frame)
                 token_entries = chord_token_entries(token_labels)
                 if not token_entries:
-                    raise RuntimeError(f"{sample.id}: no chord token entries found")
+                    raise RuntimeError(f"{sample.id}: no chord element entries found")
                 if token_limit and token_limit > 0:
                     token_entries = token_entries[:token_limit]
 
                 for export_index, token_entry in enumerate(token_entries):
                     token_index = int(token_entry["index"])
                     label = str(token_entry["display"])
+                    chord_label = str(token_entry.get("chord_label", ""))
+                    role = str(token_entry.get("chord_element", ""))
                     print(
-                        f"[export] {sample.id}: chord {export_index + 1}/{len(token_entries)} "
-                        f"token {token_index} {label!r}",
+                        f"[export] {sample.id}: chord element {export_index + 1}/{len(token_entries)} "
+                        f"token {token_index} {label!r} chord={chord_label!r} role={role}",
                         flush=True,
                     )
                     frame = find_graph_frame(page)
@@ -952,7 +1046,7 @@ def main() -> None:
             exported_samples.append(export_sample(sync_playwright, args, sample, sentence, config_path))
 
     manifest = {
-        "version": 5,
+        "version": 6,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "export": {
             "status": "smoke" if args.smoke else "full",
